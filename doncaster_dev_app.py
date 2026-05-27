@@ -25,6 +25,26 @@ if 'inputs' not in st.session_state:
         'min_return_rate': 0.060,
     }
 
+if 'soft_costs' not in st.session_state:
+    st.session_state.soft_costs = {
+        'demolition': 25000,
+        'subdivision_survey': 65000,
+        'architecture_design': 55000,
+        'engineering_permits': 30000,
+        'council_contributions': 28000,
+        'landscaping': 55000,
+        'accounting_legal': 20000,
+        'insurance': 12000,
+        'misc1_cost': 20000,
+        'misc1_header': 'Project Management',
+        'misc2_cost': 0,
+        'misc2_header': 'Reserve Buffer',
+        'misc3_cost': 0,
+        'misc3_header': 'Contingency (Additional)',
+        'misc4_cost': 0,
+        'misc4_header': 'Utilities & Connections',
+    }
+
 def calc_stamp_duty(land_price):
     if land_price <= 25000:
         return land_price * 0.014
@@ -35,8 +55,8 @@ def calc_stamp_duty(land_price):
     else:
         return 52800 + (land_price - 960000) * 0.06
 
-def calc_project(land, build, sale, rate, months, equity, contingency):
-    """Full project calculation"""
+def calc_project(land, build, sale, rate, months, equity, contingency, soft_costs_dict):
+    """Full project calculation with dynamic soft costs"""
     # Land acquisition
     stamp_duty = calc_stamp_duty(land)
     legal_land = 8000
@@ -46,8 +66,21 @@ def calc_project(land, build, sale, rate, months, equity, contingency):
     total_construction = build * 2
     contingency_amt = total_construction * contingency
     
-    # Soft costs
-    soft_costs = (25000 + 65000 + 55000 + 30000 + 28000 + 18000 + 55000 + 20000 + 12000 + 0 + 20000)
+    # Soft costs (sum from all items in dict)
+    soft_costs = (
+        soft_costs_dict['demolition'] +
+        soft_costs_dict['subdivision_survey'] +
+        soft_costs_dict['architecture_design'] +
+        soft_costs_dict['engineering_permits'] +
+        soft_costs_dict['council_contributions'] +
+        soft_costs_dict['landscaping'] +
+        soft_costs_dict['accounting_legal'] +
+        soft_costs_dict['insurance'] +
+        soft_costs_dict['misc1_cost'] +
+        soft_costs_dict['misc2_cost'] +
+        soft_costs_dict['misc3_cost'] +
+        soft_costs_dict['misc4_cost']
+    )
     
     # Hard costs
     hard_costs = land_cost + total_construction + contingency_amt + soft_costs
@@ -63,8 +96,21 @@ def calc_project(land, build, sale, rate, months, equity, contingency):
     # Selling costs
     agent_fees = gross_revenue * 0.025
     marketing_legal = 15000 + 8000
-    gst = max(0, (gross_revenue - land) / 11)
-    total_selling = agent_fees + marketing_legal + gst
+    
+    # GST CALCULATION (Dynamic)
+    # GST collected on sale (margin scheme)
+    gst_collected = max(0, (gross_revenue - land) / 11)
+    
+    # GST paid on inputs (can claim back once registered)
+    gst_on_construction = (total_construction + contingency_amt) * 0.10
+    gst_on_soft_costs = soft_costs * 0.10
+    total_gst_paid = gst_on_construction + gst_on_soft_costs
+    
+    # NET GST payable (after claiming input credits)
+    net_gst_payable = max(0, gst_collected - total_gst_paid)
+    
+    gst = net_gst_payable  # For backwards compatibility
+    total_selling = agent_fees + marketing_legal + net_gst_payable
     
     # Total costs
     total_costs = hard_costs + finance_cost + total_selling
@@ -84,7 +130,11 @@ def calc_project(land, build, sale, rate, months, equity, contingency):
         'finance_cost': finance_cost,
         'gross_revenue': gross_revenue,
         'agent_fees': agent_fees,
-        'gst': gst,
+        'gst_collected': gst_collected,
+        'gst_on_construction': gst_on_construction,
+        'gst_on_soft_costs': gst_on_soft_costs,
+        'total_gst_paid': total_gst_paid,
+        'net_gst_payable': net_gst_payable,
         'total_selling': total_selling,
         'total_costs': total_costs,
         'net_profit': net_profit,
@@ -93,9 +143,43 @@ def calc_project(land, build, sale, rate, months, equity, contingency):
         'roe_pa': (net_profit / equity_amt * 100 / (months / 12)) if equity_amt > 0 and months > 0 else 0,
     }
 
+# Helper function for synced slider + input
+def slider_with_input(label, min_val, max_val, current_val_pct, step, key_suffix, display_pct=True):
+    """Create a slider with synced input box. Values in % (multiply by 100)"""
+    col_slider, col_input = st.columns([3, 1])
+    
+    with col_slider:
+        slider_val = st.slider(
+            label, 
+            min_value=min_val, 
+            max_value=max_val, 
+            value=current_val_pct,
+            step=step,
+            format="%.2f%%" if display_pct else "%.0f",
+            label_visibility="collapsed",
+            key=f"{key_suffix}_slider"
+        )
+    
+    with col_input:
+        input_val = st.number_input(
+            f"{label} input",
+            value=current_val_pct,
+            step=step,
+            min_value=min_val,
+            max_value=max_val,
+            format="%.2f",
+            label_visibility="collapsed",
+            key=f"{key_suffix}_input"
+        )
+    
+    # Return the value that was most recently changed
+    # (slider takes priority if it was moved)
+    final_val = slider_val if slider_val != current_val_pct else input_val
+    return final_val
+
 # Sidebar for inputs
 st.sidebar.markdown("## 📋 INPUT ASSUMPTIONS")
-st.sidebar.markdown("All yellow fields below are adjustable. Model updates in real-time.")
+st.sidebar.markdown("Drag sliders OR type exact values. All % values shown with 2 decimals.")
 
 with st.sidebar:
     st.subheader("Land & Acquisition")
@@ -108,8 +192,83 @@ with st.sidebar:
     st.session_state.inputs['build_per_unit'] = build
     st.caption("Range: $900K-$1.1M (local builder intel)")
     
-    contingency = st.slider("Contingency %", 0.05, 0.20, st.session_state.inputs['contingency_pct'], 0.01, format="%.1f%%")
-    st.session_state.inputs['contingency_pct'] = contingency
+    # ============================================================
+    # CONTINGENCY: Slider + Input (Synced)
+    # ============================================================
+    st.markdown("**Contingency %** (Slider or Input)")
+    contingency_pct = slider_with_input(
+        "Contingency",
+        min_val=5.0,
+        max_val=20.0,
+        current_val_pct=st.session_state.inputs['contingency_pct'] * 100,
+        step=0.1,
+        key_suffix="contingency",
+        display_pct=True
+    )
+    st.session_state.inputs['contingency_pct'] = contingency_pct / 100
+    
+    # ============================================================
+    # SOFT COSTS BREAKDOWN (NEW)
+    # ============================================================
+    st.subheader("Soft Costs Breakdown")
+    st.caption("💡 Edit each item below. Total auto-sums.")
+    
+    soft_demo = st.number_input("Demolition ($)", value=st.session_state.soft_costs['demolition'], step=1000, min_value=0, max_value=100000, key="sc_demo")
+    st.session_state.soft_costs['demolition'] = soft_demo
+    
+    soft_sub = st.number_input("Subdivision & Survey ($)", value=st.session_state.soft_costs['subdivision_survey'], step=1000, min_value=0, max_value=150000, key="sc_sub")
+    st.session_state.soft_costs['subdivision_survey'] = soft_sub
+    
+    soft_arch = st.number_input("Architecture & Design ($)", value=st.session_state.soft_costs['architecture_design'], step=1000, min_value=0, max_value=150000, key="sc_arch")
+    st.session_state.soft_costs['architecture_design'] = soft_arch
+    
+    soft_eng = st.number_input("Engineering & Permits ($)", value=st.session_state.soft_costs['engineering_permits'], step=1000, min_value=0, max_value=100000, key="sc_eng")
+    st.session_state.soft_costs['engineering_permits'] = soft_eng
+    
+    soft_council = st.number_input("Council Contributions ($)", value=st.session_state.soft_costs['council_contributions'], step=1000, min_value=0, max_value=100000, key="sc_council")
+    st.session_state.soft_costs['council_contributions'] = soft_council
+    
+    soft_land = st.number_input("Landscaping ($)", value=st.session_state.soft_costs['landscaping'], step=1000, min_value=0, max_value=150000, key="sc_land")
+    st.session_state.soft_costs['landscaping'] = soft_land
+    
+    soft_acc = st.number_input("Accounting & Legal ($)", value=st.session_state.soft_costs['accounting_legal'], step=1000, min_value=0, max_value=50000, key="sc_acc")
+    st.session_state.soft_costs['accounting_legal'] = soft_acc
+    
+    soft_ins = st.number_input("Insurance ($)", value=st.session_state.soft_costs['insurance'], step=1000, min_value=0, max_value=50000, key="sc_ins")
+    st.session_state.soft_costs['insurance'] = soft_ins
+    
+    st.markdown("**Miscellaneous / Custom Items:**")
+    
+    # Misc 1
+    misc1_header = st.text_input("Item 1 Name", value=st.session_state.soft_costs['misc1_header'], key="misc1_hdr", placeholder="e.g. Project Management")
+    st.session_state.soft_costs['misc1_header'] = misc1_header
+    soft_misc1 = st.number_input(f"{misc1_header} ($)", value=st.session_state.soft_costs['misc1_cost'], step=1000, min_value=0, max_value=100000, key="sc_misc1")
+    st.session_state.soft_costs['misc1_cost'] = soft_misc1
+    
+    # Misc 2
+    misc2_header = st.text_input("Item 2 Name", value=st.session_state.soft_costs['misc2_header'], key="misc2_hdr", placeholder="e.g. Reserve Buffer")
+    st.session_state.soft_costs['misc2_header'] = misc2_header
+    soft_misc2 = st.number_input(f"{misc2_header} ($)", value=st.session_state.soft_costs['misc2_cost'], step=1000, min_value=0, max_value=100000, key="sc_misc2")
+    st.session_state.soft_costs['misc2_cost'] = soft_misc2
+    
+    # Misc 3
+    misc3_header = st.text_input("Item 3 Name", value=st.session_state.soft_costs['misc3_header'], key="misc3_hdr", placeholder="e.g. Extra Contingency")
+    st.session_state.soft_costs['misc3_header'] = misc3_header
+    soft_misc3 = st.number_input(f"{misc3_header} ($)", value=st.session_state.soft_costs['misc3_cost'], step=1000, min_value=0, max_value=100000, key="sc_misc3")
+    st.session_state.soft_costs['misc3_cost'] = soft_misc3
+    
+    # Misc 4
+    misc4_header = st.text_input("Item 4 Name", value=st.session_state.soft_costs['misc4_header'], key="misc4_hdr", placeholder="e.g. Utilities")
+    st.session_state.soft_costs['misc4_header'] = misc4_header
+    soft_misc4 = st.number_input(f"{misc4_header} ($)", value=st.session_state.soft_costs['misc4_cost'], step=1000, min_value=0, max_value=100000, key="sc_misc4")
+    st.session_state.soft_costs['misc4_cost'] = soft_misc4
+    
+    # Show total soft costs
+    total_soft = (soft_demo + soft_sub + soft_arch + soft_eng + soft_council + 
+                  soft_land + soft_acc + soft_ins + soft_misc1 + soft_misc2 + soft_misc3 + soft_misc4)
+    st.info(f"**Total Soft Costs: ${total_soft:,.0f}**")
+    
+    st.markdown("---")
     
     st.subheader("Revenue")
     sale = st.number_input("Sale price per unit ($)", value=st.session_state.inputs['sale_per_unit'], step=50000, min_value=1200000, max_value=2500000)
@@ -117,19 +276,59 @@ with st.sidebar:
     st.caption("EDSC zone 4bed new: $1.3M-$2.3M range")
     
     st.subheader("Finance")
-    rate = st.slider("Interest rate (p.a.)", 0.05, 0.12, st.session_state.inputs['interest_rate'], 0.0025, format="%.2f%%")
-    st.session_state.inputs['interest_rate'] = rate
     
-    months = st.slider("Project timeline (months)", 20, 50, st.session_state.inputs['timeline_months'], 1)
+    # ============================================================
+    # INTEREST RATE: Slider + Input (Synced)
+    # ============================================================
+    st.markdown("**Interest Rate p.a. %** (Slider or Input)")
+    interest_rate_pct = slider_with_input(
+        "Interest rate",
+        min_val=5.0,
+        max_val=12.0,
+        current_val_pct=st.session_state.inputs['interest_rate'] * 100,
+        step=0.05,
+        key_suffix="interest_rate",
+        display_pct=True
+    )
+    st.session_state.inputs['interest_rate'] = interest_rate_pct / 100
+    
+    # Timeline
+    st.markdown("**Project Timeline (months)**")
+    months = st.slider("Months", 20, 50, st.session_state.inputs['timeline_months'], 1, label_visibility="collapsed")
     st.session_state.inputs['timeline_months'] = months
     
-    equity = st.slider("Equity contribution %", 0.10, 0.50, st.session_state.inputs['equity_pct'], 0.01, format="%.0f%%")
-    st.session_state.inputs['equity_pct'] = equity
+    # ============================================================
+    # EQUITY CONTRIBUTION: Slider + Input (Synced)
+    # ============================================================
+    st.markdown("**Equity Contribution %** (Slider or Input)")
+    equity_pct = slider_with_input(
+        "Equity %",
+        min_val=10.0,
+        max_val=50.0,
+        current_val_pct=st.session_state.inputs['equity_pct'] * 100,
+        step=0.5,
+        key_suffix="equity",
+        display_pct=True
+    )
+    st.session_state.inputs['equity_pct'] = equity_pct / 100
     
     st.subheader("Partner Safety Net")
-    min_ret = st.slider("Min guaranteed return (p.a.)", 0.02, 0.12, st.session_state.inputs['min_return_rate'], 0.005, format="%.2f%%")
-    st.session_state.inputs['min_return_rate'] = min_ret
-    st.caption("Above TD (~5.2%), below ASX (~9.5%)")
+    
+    # ============================================================
+    # MIN RETURN RATE: Slider + Input (Synced)
+    # ============================================================
+    st.markdown("**Min Guaranteed Return (p.a.) %** (Slider or Input)")
+    min_ret_pct = slider_with_input(
+        "Min return %",
+        min_val=2.0,
+        max_val=12.0,
+        current_val_pct=st.session_state.inputs['min_return_rate'] * 100,
+        step=0.1,
+        key_suffix="min_return",
+        display_pct=True
+    )
+    st.session_state.inputs['min_return_rate'] = min_ret_pct / 100
+    st.caption("Above TD (~5.20%), below ASX (~9.50%)")
 
 # Calculate base case
 result = calc_project(
@@ -139,7 +338,8 @@ result = calc_project(
     st.session_state.inputs['interest_rate'],
     st.session_state.inputs['timeline_months'],
     st.session_state.inputs['equity_pct'],
-    st.session_state.inputs['contingency_pct']
+    st.session_state.inputs['contingency_pct'],
+    st.session_state.soft_costs
 )
 
 # Main tabs
@@ -153,7 +353,7 @@ with tab1:
     
     with col1:
         st.metric("Gross Revenue", f"${result['gross_revenue']:,.0f}", delta="2 units")
-        st.metric("Equity Required", f"${result['equity_amt']:,.0f}", delta=f"{st.session_state.inputs['equity_pct']*100:.0f}% of hard costs")
+        st.metric("Equity Required", f"${result['equity_amt']:,.0f}", delta=f"{st.session_state.inputs['equity_pct']*100:.2f}% of hard costs")
     
     with col2:
         st.metric("Total Costs", f"${result['total_costs']:,.0f}", delta="All-in")
@@ -219,7 +419,7 @@ with tab1:
             'Stamp Duty (VIC)',
             'Legal & Conveyancing',
             'Construction (2 units)',
-            'Contingency (10%)',
+            'Contingency (%.2f%%)' % (st.session_state.inputs['contingency_pct']*100),
             'Soft Costs',
             '  - Demolition',
             '  - Subdivision & Survey',
@@ -229,16 +429,19 @@ with tab1:
             '  - Landscaping',
             '  - Accounting & Legal',
             '  - Insurance',
-            '  - Miscellaneous',
+            f'  - {st.session_state.soft_costs["misc1_header"]}',
+            f'  - {st.session_state.soft_costs["misc2_header"]}',
+            f'  - {st.session_state.soft_costs["misc3_header"]}',
+            f'  - {st.session_state.soft_costs["misc4_header"]}',
             'Total Hard Costs',
             '',
             'FINANCING',
-            'Development Finance Interest',
+            'Development Finance Interest (%.2f%% p.a.)' % (st.session_state.inputs['interest_rate']*100),
             '',
             'SELLING COSTS',
             'Agent Commission (2.5%)',
             'Marketing & Legal',
-            'GST (Margin Scheme)',
+            'GST (Net payable to ATO)',
             'Total Selling Costs',
             '',
             'TOTAL ALL COSTS',
@@ -256,7 +459,18 @@ with tab1:
             f"${result['total_construction']:,.0f}",
             f"${result['contingency']:,.0f}",
             f"${result['soft_costs']:,.0f}",
-            "$25,000", "$65,000", "$55,000", "$30,000", "$28,000", "$55,000", "$20,000", "$12,000", "$20,000",
+            f"${st.session_state.soft_costs['demolition']:,.0f}",
+            f"${st.session_state.soft_costs['subdivision_survey']:,.0f}",
+            f"${st.session_state.soft_costs['architecture_design']:,.0f}",
+            f"${st.session_state.soft_costs['engineering_permits']:,.0f}",
+            f"${st.session_state.soft_costs['council_contributions']:,.0f}",
+            f"${st.session_state.soft_costs['landscaping']:,.0f}",
+            f"${st.session_state.soft_costs['accounting_legal']:,.0f}",
+            f"${st.session_state.soft_costs['insurance']:,.0f}",
+            f"${st.session_state.soft_costs['misc1_cost']:,.0f}",
+            f"${st.session_state.soft_costs['misc2_cost']:,.0f}",
+            f"${st.session_state.soft_costs['misc3_cost']:,.0f}",
+            f"${st.session_state.soft_costs['misc4_cost']:,.0f}",
             f"${result['hard_costs']:,.0f}",
             '',
             '',
@@ -265,7 +479,7 @@ with tab1:
             '',
             f"${result['agent_fees']:,.0f}",
             "$23,000",
-            f"${result['gst']:,.0f}",
+            f"${result['net_gst_payable']:,.0f}",
             f"${result['total_selling']:,.0f}",
             '',
             f"${result['total_costs']:,.0f}",
@@ -283,7 +497,7 @@ with tab1:
             f"{(result['total_construction']/result['gross_revenue']*100):.1f}%",
             f"{(result['contingency']/result['gross_revenue']*100):.1f}%",
             f"{(result['soft_costs']/result['gross_revenue']*100):.1f}%",
-            "", "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "", "", "", "", "",
             f"{(result['hard_costs']/result['gross_revenue']*100):.1f}%",
             '',
             '',
@@ -292,7 +506,7 @@ with tab1:
             '',
             f"{(result['agent_fees']/result['gross_revenue']*100):.2f}%",
             f"{(23000/result['gross_revenue']*100):.2f}%",
-            f"{(result['gst']/result['gross_revenue']*100):.1f}%",
+            f"{(result['net_gst_payable']/result['gross_revenue']*100):.1f}%",
             f"{(result['total_selling']/result['gross_revenue']*100):.1f}%",
             '',
             f"{(result['total_costs']/result['gross_revenue']*100):.1f}%",
@@ -310,12 +524,77 @@ with tab1:
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Min Guarantee Required", f"${min_guarantee:,.0f}", delta=f"{st.session_state.inputs['min_return_rate']*100:.1f}% p.a.")
+        st.metric("Min Guarantee Required", f"${min_guarantee:,.0f}", delta=f"{st.session_state.inputs['min_return_rate']*100:.2f}% p.a.")
     with col2:
         status = "✅ PASS" if result['net_profit'] >= min_guarantee else "❌ FAIL"
         st.metric("Profit vs Guarantee", status)
     with col3:
         st.metric("Surplus / (Shortfall)", f"${surplus:,.0f}")
+    
+    # ============================================================
+    # GST BREAKDOWN (NEW - DYNAMIC)
+    # ============================================================
+    st.markdown("---")
+    st.subheader("📊 GST Breakdown (Dynamic)")
+    st.caption("💡 All figures update automatically as you change build cost, sale price, or soft costs")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("GST Collected (on sale)", f"${result['gst_collected']:,.0f}", delta="Margin scheme")
+    with col2:
+        st.metric("GST on Inputs (to claim)", f"${result['total_gst_paid']:,.0f}", delta=f"Construction: ${result['gst_on_construction']:,.0f}\nSoft costs: ${result['gst_on_soft_costs']:,.0f}")
+    with col3:
+        st.metric("NET GST Payable to ATO", f"${result['net_gst_payable']:,.0f}", delta="After input credits")
+    
+    # Detailed GST table
+    st.markdown("**GST Detailed Calculation:**")
+    gst_breakdown = {
+        'GST Item': [
+            'GST COLLECTED (On Sale)',
+            'Sale revenue (margin)',
+            'GST collected (margin scheme)',
+            '',
+            'GST ON INPUTS (Can Claim Back)',
+            'Construction + Contingency',
+            'GST on construction',
+            'Soft costs',
+            'GST on soft costs',
+            'Total GST paid on inputs',
+            '',
+            'NET GST PAYABLE TO ATO',
+            'GST collected',
+            'Less: GST on inputs (credit)',
+            'Net GST to pay',
+        ],
+        'Amount': [
+            '',
+            f"${(result['gross_revenue'] - st.session_state.inputs['land_price']):,.0f}",
+            f"${result['gst_collected']:,.0f}",
+            '',
+            '',
+            f"${result['total_construction'] + result['contingency']:,.0f}",
+            f"${result['gst_on_construction']:,.0f}",
+            f"${result['soft_costs']:,.0f}",
+            f"${result['gst_on_soft_costs']:,.0f}",
+            f"${result['total_gst_paid']:,.0f}",
+            '',
+            '',
+            f"${result['gst_collected']:,.0f}",
+            f"-${result['total_gst_paid']:,.0f}",
+            f"${result['net_gst_payable']:,.0f}",
+        ]
+    }
+    df_gst = pd.DataFrame(gst_breakdown)
+    st.dataframe(df_gst, use_container_width=True, hide_index=True)
+    
+    st.info(
+        "💡 **How This Works:**\n\n"
+        "1. You collect GST on the sale from your buyers\n"
+        "2. You paid GST to contractors and suppliers on construction & soft costs\n"
+        "3. Once registered, you can **claim back** the GST you paid on inputs\n"
+        "4. **NET GST** = What you collected - What you paid = What you owe to ATO\n\n"
+        "**Example:** Collected $236K - Paid $180K on inputs = Owe ATO ~$56K"
+    )
 
 # ============================================================================
 # TAB 2: SCENARIOS
@@ -351,7 +630,8 @@ with tab2:
     for name, params in scenarios.items():
         scn_results[name] = calc_project(
             params['land'], params['build'], params['sale'],
-            params['rate'], params['months'], params['equity'], params['cont']
+            params['rate'], params['months'], params['equity'], params['cont'],
+            st.session_state.soft_costs
         )
     
     # Summary cards
@@ -366,7 +646,7 @@ with tab2:
             st.metric(
                 f"{color_indicator} {name}",
                 f"${res['net_profit']/1e6:.2f}M",
-                delta=f"{res['roe_pa']:.1f}% ROE p.a.",
+                delta=f"{res['roe_pa']:.2f}% ROE p.a.",
                 delta_color=profit_color
             )
     
@@ -376,14 +656,14 @@ with tab2:
     st.subheader("Scenario Comparison")
     comparison_data = {
         'Scenario': list(scenarios.keys()),
-        'Build/Unit': [scenarios[s]['build'] for s in scenarios.keys()],
-        'Sale/Unit': [scenarios[s]['sale'] for s in scenarios.keys()],
+        'Build/Unit': [f"${scenarios[s]['build']/1e3:.0f}K" for s in scenarios.keys()],
+        'Sale/Unit': [f"${scenarios[s]['sale']/1e6:.2f}M" for s in scenarios.keys()],
         'Interest %': [f"{scenarios[s]['rate']*100:.2f}%" for s in scenarios.keys()],
         'Timeline': [f"{scenarios[s]['months']} mths" for s in scenarios.keys()],
-        'Net Profit': [f"${scn_results[s]['net_profit']:,.0f}" for s in scenarios.keys()],
+        'Net Profit': [f"${scn_results[s]['net_profit']/1e6:.2f}M" for s in scenarios.keys()],
         'ROI': [f"{scn_results[s]['roi']:.1f}%" for s in scenarios.keys()],
         'ROE Total': [f"{scn_results[s]['roe_total']:.1f}%" for s in scenarios.keys()],
-        'ROE p.a.': [f"{scn_results[s]['roe_pa']:.1f}%" for s in scenarios.keys()],
+        'ROE p.a.': [f"{scn_results[s]['roe_pa']:.2f}%" for s in scenarios.keys()],
     }
     df_scn = pd.DataFrame(comparison_data)
     st.dataframe(df_scn, use_container_width=True, hide_index=True)
@@ -410,7 +690,7 @@ with tab2:
         fig = go.Figure(data=[
             go.Bar(x=scn_names, y=[scn_results[s]['roe_total']*100 for s in scn_names],
                    marker_color=[colors_map.get(s, '#808080') for s in scn_names],
-                   text=[f"{scn_results[s]['roe_total']:.1f}%" for s in scn_names],
+                   text=[f"{scn_results[s]['roe_total']:.2f}%" for s in scn_names],
                    textposition='outside')
         ])
         fig.update_layout(title="Total ROE by Scenario", yaxis_title="ROE (%)", height=350)
@@ -420,10 +700,10 @@ with tab2:
         fig = go.Figure(data=[
             go.Bar(x=scn_names, y=[scn_results[s]['roe_pa']*100 for s in scn_names],
                    marker_color=[colors_map.get(s, '#808080') for s in scn_names],
-                   text=[f"{scn_results[s]['roe_pa']:.1f}%" for s in scn_names],
+                   text=[f"{scn_results[s]['roe_pa']:.2f}%" for s in scn_names],
                    textposition='outside')
         ])
-        fig.add_hline(y=6.0, line_dash="dash", line_color="green", annotation_text="Min Guarantee (6.0%)")
+        fig.add_hline(y=6.0, line_dash="dash", line_color="green", annotation_text="Min Guarantee (6.00%)")
         fig.update_layout(title="Annualised ROE by Scenario", yaxis_title="ROE p.a. (%)", height=350)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -446,7 +726,8 @@ with tab3:
                 st.session_state.inputs['interest_rate'],
                 st.session_state.inputs['timeline_months'],
                 st.session_state.inputs['equity_pct'],
-                st.session_state.inputs['contingency_pct']
+                st.session_state.inputs['contingency_pct'],
+                st.session_state.soft_costs
             )
             sensitivity_matrix[i, j] = res['net_profit']
     
@@ -483,7 +764,8 @@ with tab3:
                     st.session_state.inputs['interest_rate'],
                     st.session_state.inputs['timeline_months'],
                     st.session_state.inputs['equity_pct'],
-                    st.session_state.inputs['contingency_pct']
+                    st.session_state.inputs['contingency_pct'],
+                    st.session_state.soft_costs
                 )
                 if -50000 < res['net_profit'] < 50000:
                     st.info(f"**Break-even approximately at:**\n\n- Build cost: **${b:,.0f}** per unit\n- Sale price: **${s:,.0f}** per unit")
@@ -515,7 +797,7 @@ with tab4:
         
         partner_pcts = []
         for i, p in enumerate(partners):
-            val = st.slider(f"{p} (%)", 0.0, 100.0, st.session_state.partner_pcts[i], 5.0, key=f"partner_{i}")
+            val = st.slider(f"{p} (%)", 0.0, 100.0, st.session_state.partner_pcts[i], 5.0, key=f"partner_{i}", format="%.2f%%")
             partner_pcts.append(val / 100)
             st.session_state.partner_pcts[i] = val / 100
         
@@ -547,8 +829,8 @@ with tab4:
                 'Min Guarantee': f"${min_guarantee:,.0f}",
                 'Profit Share': f"${profit_share:,.0f}",
                 'Actual Return': f"${actual_return:,.0f}",
-                'ROE Total': f"{roe_total:.1f}%",
-                'ROE p.a.': f"{roe_pa:.1f}%",
+                'ROE Total': f"{roe_total:.2f}%",
+                'ROE p.a.': f"{roe_pa:.2f}%",
             })
         
         df_partners = pd.DataFrame(partner_data)
@@ -589,7 +871,7 @@ with tab4:
                 st.markdown(f"### {partner}")
                 st.metric("Capital", f"${capital/1e6:.2f}M")
                 st.metric("Actual Return", f"${actual_return/1e6:.2f}M")
-                st.metric("ROE p.a.", f"{roe_pa:.1f}%")
+                st.metric("ROE p.a.", f"{roe_pa:.2f}%")
                 
                 if actual_return == min_guarantee:
                     st.caption("⚠️ Receiving min guarantee (not profit)")
@@ -649,8 +931,8 @@ with tab5:
             f'{st.session_state.inputs["interest_rate"]*100:.2f}% p.a.',
             '',
             '',
-            '5.2%-5.6% p.a.',
-            '5.0%-5.5% p.a.',
+            '5.20%-5.60% p.a.',
+            '5.00%-5.50% p.a.',
             '~9-11% p.a.',
             '~1.5%-5% p.a.',
             f'{st.session_state.inputs["min_return_rate"]*100:.2f}% p.a.',
@@ -707,14 +989,15 @@ with tab5:
     with col2:
         st.warning(
             "⚠️ **Finance Costs Add Up**\n\n"
-            "At 7.75% over 34 months, interest totals ~$445K—nearly 11% of revenue. "
+            f"At {st.session_state.inputs['interest_rate']*100:.2f}% over {st.session_state.inputs['timeline_months']} months, "
+            f"interest totals ~${result['finance_cost']/1e3:.0f}K—nearly {result['finance_cost']/result['gross_revenue']*100:.1f}% of revenue. "
             "Lower rates or faster timeline improve significantly."
         )
         
         st.success(
             "✅ **Min Guarantee Strategy**\n\n"
-            "Your 6.0% p.a. safety net sits above savings (~5.2%) "
-            "but well below ASX (~9.5%), balancing security & upside."
+            f"Your {st.session_state.inputs['min_return_rate']*100:.2f}% p.a. safety net sits above savings (~5.20%) "
+            "but well below ASX (~9.50%), balancing security & upside."
         )
 
 # ============================================================================
@@ -724,7 +1007,7 @@ st.markdown("---")
 st.markdown(
     "<div style='text-align: center; font-size: 12px; color: #808080;'>"
     "<p>Doncaster East Dual-Occupancy Financial Model — Offline Version</p>"
-    f"<p>Generated {datetime.now().strftime('%d %b %Y %H:%M')} | Use on desktop/tablet for best experience</p>"
+    f"<p>Generated {datetime.now().strftime('%d %b %Y %H:%M')} | All % values show 2 decimal places for precision</p>"
     "</div>",
     unsafe_allow_html=True
 )
